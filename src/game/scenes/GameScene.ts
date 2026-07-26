@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
-import { GAME_HEIGHT } from '../config';
+import { GAME_HEIGHT, GAME_WIDTH } from '../config';
+import { LightingSystem } from '../systems/LightingSystem';
 
 const PLAYER_SPEED = 160;
 const PLAYER_SIZE = 26;
@@ -17,6 +18,9 @@ const DPAD_MARGIN = 24;
 const DPAD_ALPHA_IDLE = 0.4;
 const DPAD_ALPHA_PRESSED = 0.75;
 
+const LANTERN_BUTTON_SIZE = 64;
+const UI_DEPTH = 200;
+
 const COLOR_BACKGROUND = 0x0a0a12;
 const COLOR_FLOOR = 0x14141d;
 const COLOR_FLOOR_GRID = 0x1e1e2e;
@@ -25,6 +29,8 @@ const COLOR_PLAYER = 0x7a68e0;
 const COLOR_PLAYER_EYES = 0xdff6ff;
 const COLOR_DPAD = 0x3a4368;
 const COLOR_DPAD_ARROW = 0x9fb4ff;
+const COLOR_LANTERN_ON = 0xffd98a;
+const COLOR_LANTERN_OFF = 0x5a6285;
 
 type Direction = 'up' | 'down' | 'left' | 'right';
 
@@ -34,6 +40,10 @@ export class GameScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Image;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys!: Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
+  private lanternKey!: Phaser.Input.Keyboard.Key;
+  private lighting!: LightingSystem;
+  private lanternButton!: Phaser.GameObjects.Image;
+  private lanternLabel!: Phaser.GameObjects.Text;
   private dpadButtons!: Record<Direction, Phaser.GameObjects.Image>;
   private dpadPointers: Record<Direction, Set<number>> = {
     up: new Set(),
@@ -56,6 +66,9 @@ export class GameScene extends Phaser.Scene {
     this.createPlayer();
     this.createKeyboard();
 
+    this.lighting = new LightingSystem(this);
+    this.createLanternButton();
+
     // Два дополнительных указателя для диагонального мультитача на D-pad.
     this.input.addPointer(2);
     this.createDpad();
@@ -77,6 +90,12 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.player.setVelocity(this.moveVector.x, this.moveVector.y);
+
+    if (Phaser.Input.Keyboard.JustDown(this.lanternKey)) {
+      this.toggleLantern();
+    }
+
+    this.lighting.update(this.player.x, this.player.y);
   }
 
   private createTextures(): void {
@@ -119,6 +138,25 @@ export class GameScene extends Phaser.Scene {
       graphics.generateTexture(`dpad-${direction}`, DPAD_BUTTON_SIZE, DPAD_BUTTON_SIZE);
       graphics.clear();
     }
+
+    // Кнопка фонаря: включён — тёплый светящийся круг, выключен — тусклый контур.
+    const lanternCenter = LANTERN_BUTTON_SIZE / 2;
+    graphics.fillStyle(COLOR_DPAD, 1);
+    graphics.fillRect(0, 0, LANTERN_BUTTON_SIZE, LANTERN_BUTTON_SIZE);
+    graphics.fillStyle(COLOR_LANTERN_ON, 1);
+    graphics.fillCircle(lanternCenter, lanternCenter + 2, 14);
+    graphics.fillRect(lanternCenter - 6, lanternCenter - 20, 12, 6);
+    graphics.generateTexture('lantern-on', LANTERN_BUTTON_SIZE, LANTERN_BUTTON_SIZE);
+    graphics.clear();
+
+    graphics.fillStyle(COLOR_DPAD, 1);
+    graphics.fillRect(0, 0, LANTERN_BUTTON_SIZE, LANTERN_BUTTON_SIZE);
+    graphics.lineStyle(2, COLOR_LANTERN_OFF, 1);
+    graphics.strokeCircle(lanternCenter, lanternCenter + 2, 14);
+    graphics.fillStyle(COLOR_LANTERN_OFF, 1);
+    graphics.fillRect(lanternCenter - 6, lanternCenter - 20, 12, 6);
+    graphics.generateTexture('lantern-off', LANTERN_BUTTON_SIZE, LANTERN_BUTTON_SIZE);
+    graphics.clear();
 
     graphics.destroy();
   }
@@ -168,6 +206,31 @@ export class GameScene extends Phaser.Scene {
     }
     this.cursors = keyboard.createCursorKeys();
     this.wasdKeys = keyboard.addKeys('W,A,S,D') as Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
+    this.lanternKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F);
+  }
+
+  private createLanternButton(): void {
+    const x = GAME_WIDTH - DPAD_MARGIN - LANTERN_BUTTON_SIZE / 2;
+    const y = GAME_HEIGHT - DPAD_MARGIN - LANTERN_BUTTON_SIZE / 2;
+
+    this.lanternButton = this.add.image(x, y, 'lantern-on');
+    this.lanternButton.setDepth(UI_DEPTH);
+    this.lanternButton.setInteractive();
+    this.lanternButton.on('pointerdown', () => this.toggleLantern());
+
+    this.lanternLabel = this.add.text(x, y - LANTERN_BUTTON_SIZE / 2 - 6, 'ФОНАРЬ: ВКЛ', {
+      fontSize: '14px',
+      color: '#9fb4ff',
+    });
+    this.lanternLabel.setOrigin(0.5, 1);
+    this.lanternLabel.setDepth(UI_DEPTH);
+  }
+
+  private toggleLantern(): void {
+    this.lighting.toggle();
+    const isOn = this.lighting.lanternOn;
+    this.lanternButton.setTexture(isOn ? 'lantern-on' : 'lantern-off');
+    this.lanternLabel.setText(isOn ? 'ФОНАРЬ: ВКЛ' : 'ФОНАРЬ: ВЫКЛ');
   }
 
   private createDpad(): void {
@@ -188,6 +251,7 @@ export class GameScene extends Phaser.Scene {
       const { x, y } = positions[direction];
       const button = this.add.image(x, y, `dpad-${direction}`);
       button.setAlpha(DPAD_ALPHA_IDLE);
+      button.setDepth(UI_DEPTH);
       button.setInteractive();
       button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
         this.dpadPointers[direction].add(pointer.id);
