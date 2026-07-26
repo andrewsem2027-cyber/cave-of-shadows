@@ -1,16 +1,10 @@
 import Phaser from 'phaser';
 import { GAME_HEIGHT, GAME_WIDTH } from '../config';
 import { LightingSystem } from '../systems/LightingSystem';
+import { TestFloor } from '../world/TestFloor';
 
 const PLAYER_SPEED = 160;
 const PLAYER_SIZE = 26;
-const TILE_SIZE = 32;
-const WALL_THICKNESS = 16;
-
-const ROOM_X = 48;
-const ROOM_Y = 24;
-const ROOM_WIDTH = 864;
-const ROOM_HEIGHT = 492;
 
 const DPAD_BUTTON_SIZE = 60;
 const DPAD_GAP = 8;
@@ -21,10 +15,9 @@ const DPAD_ALPHA_PRESSED = 0.75;
 const LANTERN_BUTTON_SIZE = 64;
 const UI_DEPTH = 200;
 
+const CAMERA_LERP = 0.12;
+
 const COLOR_BACKGROUND = 0x0a0a12;
-const COLOR_FLOOR = 0x14141d;
-const COLOR_FLOOR_GRID = 0x1e1e2e;
-const COLOR_WALL = 0x2b3350;
 const COLOR_PLAYER = 0x7a68e0;
 const COLOR_PLAYER_EYES = 0xdff6ff;
 const COLOR_DPAD = 0x3a4368;
@@ -52,7 +45,7 @@ export class GameScene extends Phaser.Scene {
     right: new Set(),
   };
   private moveVector = new Phaser.Math.Vector2(0, 0);
-  private walls!: Phaser.GameObjects.Rectangle[];
+  private testFloor!: TestFloor;
 
   constructor() {
     super('GameScene');
@@ -62,8 +55,12 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.setBackgroundColor(COLOR_BACKGROUND);
 
     this.createTextures();
-    this.createRoom();
+
+    this.testFloor = new TestFloor(this);
+    this.physics.world.setBounds(0, 0, this.testFloor.widthPixels, this.testFloor.heightPixels);
+
     this.createPlayer();
+    this.createCamera();
     this.createKeyboard();
 
     this.lighting = new LightingSystem(this);
@@ -100,15 +97,6 @@ export class GameScene extends Phaser.Scene {
 
   private createTextures(): void {
     const graphics = this.add.graphics();
-
-    // Пол: тёмная плитка с едва заметной сеткой.
-    graphics.fillStyle(COLOR_FLOOR, 1);
-    graphics.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-    graphics.fillStyle(COLOR_FLOOR_GRID, 1);
-    graphics.fillRect(0, 0, TILE_SIZE, 1);
-    graphics.fillRect(0, 0, 1, TILE_SIZE);
-    graphics.generateTexture('floor-tile', TILE_SIZE, TILE_SIZE);
-    graphics.clear();
 
     // Персонаж: приглушённо-фиолетовое тело с двумя светящимися глазами.
     graphics.fillStyle(COLOR_PLAYER, 1);
@@ -161,42 +149,16 @@ export class GameScene extends Phaser.Scene {
     graphics.destroy();
   }
 
-  private createRoom(): void {
-    const innerX = ROOM_X + WALL_THICKNESS;
-    const innerY = ROOM_Y + WALL_THICKNESS;
-    const innerWidth = ROOM_WIDTH - WALL_THICKNESS * 2;
-    const innerHeight = ROOM_HEIGHT - WALL_THICKNESS * 2;
-
-    this.add.tileSprite(
-      innerX + innerWidth / 2,
-      innerY + innerHeight / 2,
-      innerWidth,
-      innerHeight,
-      'floor-tile',
-    );
-
-    const walls = [
-      this.add.rectangle(ROOM_X + ROOM_WIDTH / 2, ROOM_Y + WALL_THICKNESS / 2, ROOM_WIDTH, WALL_THICKNESS, COLOR_WALL),
-      this.add.rectangle(ROOM_X + ROOM_WIDTH / 2, ROOM_Y + ROOM_HEIGHT - WALL_THICKNESS / 2, ROOM_WIDTH, WALL_THICKNESS, COLOR_WALL),
-      this.add.rectangle(ROOM_X + WALL_THICKNESS / 2, ROOM_Y + ROOM_HEIGHT / 2, WALL_THICKNESS, ROOM_HEIGHT, COLOR_WALL),
-      this.add.rectangle(ROOM_X + ROOM_WIDTH - WALL_THICKNESS / 2, ROOM_Y + ROOM_HEIGHT / 2, WALL_THICKNESS, ROOM_HEIGHT, COLOR_WALL),
-    ];
-
-    for (const wall of walls) {
-      this.physics.add.existing(wall, true);
-    }
-
-    this.walls = walls;
+  private createPlayer(): void {
+    this.player = this.physics.add.image(this.testFloor.playerStart.x, this.testFloor.playerStart.y, 'player');
+    this.player.setCollideWorldBounds(true);
+    this.physics.add.collider(this.player, this.testFloor.solids);
   }
 
-  private createPlayer(): void {
-    this.player = this.physics.add.image(
-      ROOM_X + ROOM_WIDTH / 2,
-      ROOM_Y + ROOM_HEIGHT / 2,
-      'player',
-    );
-    this.player.setCollideWorldBounds(true);
-    this.physics.add.collider(this.player, this.walls);
+  private createCamera(): void {
+    const camera = this.cameras.main;
+    camera.setBounds(0, 0, this.testFloor.widthPixels, this.testFloor.heightPixels);
+    camera.startFollow(this.player, true, CAMERA_LERP, CAMERA_LERP);
   }
 
   private createKeyboard(): void {
@@ -215,6 +177,7 @@ export class GameScene extends Phaser.Scene {
 
     this.lanternButton = this.add.image(x, y, 'lantern-on');
     this.lanternButton.setDepth(UI_DEPTH);
+    this.lanternButton.setScrollFactor(0);
     this.lanternButton.setInteractive();
     this.lanternButton.on('pointerdown', () => this.toggleLantern());
 
@@ -224,6 +187,7 @@ export class GameScene extends Phaser.Scene {
     });
     this.lanternLabel.setOrigin(0.5, 1);
     this.lanternLabel.setDepth(UI_DEPTH);
+    this.lanternLabel.setScrollFactor(0);
   }
 
   private toggleLantern(): void {
@@ -252,6 +216,7 @@ export class GameScene extends Phaser.Scene {
       const button = this.add.image(x, y, `dpad-${direction}`);
       button.setAlpha(DPAD_ALPHA_IDLE);
       button.setDepth(UI_DEPTH);
+      button.setScrollFactor(0);
       button.setInteractive();
       button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
         this.dpadPointers[direction].add(pointer.id);

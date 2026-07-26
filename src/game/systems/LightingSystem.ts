@@ -31,6 +31,8 @@ export class LightingSystem {
     this.darkness = scene.add.renderTexture(0, 0, GAME_WIDTH, GAME_HEIGHT);
     this.darkness.setOrigin(0, 0);
     this.darkness.setDepth(DARKNESS_DEPTH);
+    // Слой закреплён относительно экрана: камера движется по миру, темнота нет.
+    this.darkness.setScrollFactor(0);
 
     // Штамп света: не добавляется в Display List, используется только
     // как источник для erase вместе со своими позицией и масштабом.
@@ -53,8 +55,10 @@ export class LightingSystem {
     });
   }
 
+  /** Принимает мировые координаты игрока, переводит их в экранные. */
   update(playerX: number, playerY: number): void {
-    this.stamp.setPosition(playerX, playerY);
+    const camera = this.scene.cameras.main;
+    this.stamp.setPosition(playerX - camera.scrollX, playerY - camera.scrollY);
     this.stamp.setScale(this.currentRadius / LANTERN_ON_RADIUS);
 
     this.darkness.clear();
