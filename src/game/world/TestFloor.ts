@@ -8,15 +8,19 @@ import {
   createTestFloor,
 } from '../domain/floor/testFloor';
 
-const COLOR_FLOOR = 0x14141d;
-const COLOR_FLOOR_GRID = 0x1e1e2e;
-const COLOR_SAFE_FLOOR = 0x15202e;
-const COLOR_SAFE_GRID = 0x1e3040;
-const COLOR_SAFE_BORDER = 0x2e4a66;
+const FLOOR_SHADES = [0x14141d, 0x15151f, 0x171822, 0x13131a];
+const SAFE_SHADES = [0x16202e, 0x17222f, 0x182433];
+const SAFE_RIM = 0x2e4a66;
+const FLOOR_CRACK = 0x0e0e14;
+const WALL_SHADES = [0x232840, 0x262c46, 0x2b3350];
+const WALL_RIM = 0x3d4666;
+const COLOR_DOOR = 0x6a5a48;
+const COLOR_DOOR_SEAM = 0x4a3e30;
 const COLOR_SAFE_LABEL = '#6f87a8';
-const COLOR_WALL = 0x2b3350;
-const COLOR_DOOR = 0x6b4a8f;
-const COLOR_DOOR_SEAM = 0x4a3264;
+
+function isWalkable(cell: CellType): boolean {
+  return cell === CellType.Floor || cell === CellType.SafeFloor;
+}
 
 /**
  * Тонкий Phaser-слой фиксированного этажа: один Graphics для визуала,
@@ -56,31 +60,97 @@ export class TestFloor {
         const y = row * TILE_SIZE;
 
         if (cell === CellType.Wall) {
-          graphics.fillStyle(COLOR_WALL, 1);
-          graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+          this.drawWall(graphics, data, col, row, x, y);
         } else if (cell === CellType.ExitDoor) {
           graphics.fillStyle(COLOR_DOOR, 1);
           graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
           graphics.fillStyle(COLOR_DOOR_SEAM, 1);
           graphics.fillRect(x + TILE_SIZE / 2 - 1, y + 3, 2, TILE_SIZE - 6);
         } else {
-          const isSafe = cell === CellType.SafeFloor;
-          graphics.fillStyle(isSafe ? COLOR_SAFE_FLOOR : COLOR_FLOOR, 1);
-          graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-          graphics.fillStyle(isSafe ? COLOR_SAFE_GRID : COLOR_FLOOR_GRID, 1);
-          graphics.fillRect(x, y, TILE_SIZE, 1);
-          graphics.fillRect(x, y, 1, TILE_SIZE);
+          this.drawFloor(graphics, data, cell, col, row, x, y);
         }
       }
     }
+  }
 
-    graphics.lineStyle(2, COLOR_SAFE_BORDER, 1);
-    graphics.strokeRect(
-      data.safeRoom.col * TILE_SIZE,
-      data.safeRoom.row * TILE_SIZE,
-      data.safeRoom.cols * TILE_SIZE,
-      data.safeRoom.rows * TILE_SIZE,
-    );
+  /** Каменный пол с детерминированными вариациями оттенка и редкими трещинами. */
+  private drawFloor(
+    graphics: Phaser.GameObjects.Graphics,
+    data: TestFloorData,
+    cell: CellType,
+    col: number,
+    row: number,
+    x: number,
+    y: number,
+  ): void {
+    const isSafe = cell === CellType.SafeFloor;
+    const shades = isSafe ? SAFE_SHADES : FLOOR_SHADES;
+
+    graphics.fillStyle(shades[(col * 7 + row * 13) % shades.length], 1);
+    graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+
+    // Редкие короткие трещины: позиция и наличие заданы формулой от координат.
+    if ((col * 31 + row * 17) % 23 === 0) {
+      graphics.fillStyle(FLOOR_CRACK, 1);
+      graphics.fillRect(x + 4 + ((col * 3 + row * 7) % 18), y + 6 + ((col * 11 + row * 3) % 18), 7, 2);
+    }
+
+    // Мягкая холодная кромка безопасной полости вместо прямоугольной рамки.
+    if (isSafe) {
+      this.drawEdgeRim(graphics, data, col, row, x, y, SAFE_RIM, CellType.Wall);
+    }
+  }
+
+  /** Стена темнее пола; край рядом с проходом подсвечен, как скальный обрыв. */
+  private drawWall(
+    graphics: Phaser.GameObjects.Graphics,
+    data: TestFloorData,
+    col: number,
+    row: number,
+    x: number,
+    y: number,
+  ): void {
+    graphics.fillStyle(WALL_SHADES[(col * 5 + row * 11) % WALL_SHADES.length], 1);
+    graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+
+    this.drawEdgeRim(graphics, data, col, row, x, y, WALL_RIM, null);
+  }
+
+  /**
+   * Полоса на стороне клетки, соседней с проходом (для стен)
+   * или со стеной (для безопасного пола).
+   */
+  private drawEdgeRim(
+    graphics: Phaser.GameObjects.Graphics,
+    data: TestFloorData,
+    col: number,
+    row: number,
+    x: number,
+    y: number,
+    color: number,
+    rimAgainst: CellType | null,
+  ): void {
+    const matches = (targetCol: number, targetRow: number): boolean => {
+      if (targetCol < 0 || targetCol >= FLOOR_COLUMNS || targetRow < 0 || targetRow >= FLOOR_ROWS) {
+        return false;
+      }
+      const neighbor = data.grid[targetRow][targetCol];
+      return rimAgainst === null ? isWalkable(neighbor) : neighbor === rimAgainst;
+    };
+
+    graphics.fillStyle(color, 1);
+    if (matches(col, row - 1)) {
+      graphics.fillRect(x, y, TILE_SIZE, 3);
+    }
+    if (matches(col, row + 1)) {
+      graphics.fillRect(x, y + TILE_SIZE - 3, TILE_SIZE, 3);
+    }
+    if (matches(col - 1, row)) {
+      graphics.fillRect(x, y, 3, TILE_SIZE);
+    }
+    if (matches(col + 1, row)) {
+      graphics.fillRect(x + TILE_SIZE - 3, y, 3, TILE_SIZE);
+    }
   }
 
   /** Строковые прогоны смежных непроходимых клеток объединяются в одно тело. */
