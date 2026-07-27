@@ -4,6 +4,8 @@
  * без случайных чисел: одинаковый запуск всегда создаёт одинаковую карту.
  */
 
+import type { KeyColor } from '../progression/KeyState';
+
 export const TILE_SIZE = 32;
 export const FLOOR_COLUMNS = 50;
 export const FLOOR_ROWS = 34;
@@ -27,6 +29,28 @@ export interface TilePoint {
   row: number;
 }
 
+export interface KeyPlacement {
+  color: KeyColor;
+  tile: TilePoint;
+}
+
+export interface DoorPlacement {
+  color: KeyColor;
+  /** Смежные клетки твёрдого тела двери. */
+  tiles: TilePoint[];
+}
+
+export interface ChestPlacement {
+  color: KeyColor;
+  tile: TilePoint;
+}
+
+export interface FloorProgression {
+  keys: KeyPlacement[];
+  doors: DoorPlacement[];
+  chests: ChestPlacement[];
+}
+
 export interface TestFloorData {
   /** grid[row][col] */
   grid: CellType[][];
@@ -34,6 +58,7 @@ export interface TestFloorData {
   /** Ограничивающий прямоугольник безопасной полости (для подписи). */
   safeRoom: GridRect;
   exitDoorTiles: TilePoint[];
+  progression: FloorProgression;
 }
 
 interface BlobSpec {
@@ -90,6 +115,29 @@ const EXIT_DOOR_TILES: TilePoint[] = [
 ];
 
 const PLAYER_START_TILE: TilePoint = { col: 5, row: 16 };
+
+/**
+ * Первый цикл прогрессии: синий ключ в верхней полости открывает синюю дверь
+ * в коридоре центр → право; за ней красный ключ; красный сундук в нише
+ * правой полости; красная дверь закрывает выход из дальней полости.
+ */
+const PROGRESSION: FloorProgression = {
+  keys: [
+    { color: 'blue', tile: { col: 19, row: 4 } },
+    { color: 'red', tile: { col: 34, row: 16 } },
+  ],
+  doors: [
+    {
+      color: 'blue',
+      tiles: [
+        { col: 25, row: 15 },
+        { col: 25, row: 16 },
+      ],
+    },
+    { color: 'red', tiles: EXIT_DOOR_TILES },
+  ],
+  chests: [{ color: 'red', tile: { col: 33, row: 20 } }],
+};
 
 /** Амплитуда неровности края полости (в единицах нормализованной дистанции). */
 const EDGE_WOBBLE = 0.22;
@@ -169,5 +217,6 @@ export function createTestFloor(): TestFloorData {
       rows: SAFE_BLOB.radiusY * 2 + 2,
     },
     exitDoorTiles: EXIT_DOOR_TILES,
+    progression: PROGRESSION,
   };
 }

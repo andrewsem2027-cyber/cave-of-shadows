@@ -14,8 +14,6 @@ const SAFE_RIM = 0x2e4a66;
 const FLOOR_CRACK = 0x0e0e14;
 const WALL_SHADES = [0x232840, 0x262c46, 0x2b3350];
 const WALL_RIM = 0x3d4666;
-const COLOR_DOOR = 0x6a5a48;
-const COLOR_DOOR_SEAM = 0x4a3e30;
 const COLOR_SAFE_LABEL = '#6f87a8';
 
 function isWalkable(cell: CellType): boolean {
@@ -31,9 +29,11 @@ export class TestFloor {
   readonly heightPixels = FLOOR_ROWS * TILE_SIZE;
   readonly playerStart: { x: number; y: number };
   readonly solids: Phaser.Physics.Arcade.StaticGroup;
+  readonly data: TestFloorData;
 
   constructor(scene: Phaser.Scene) {
     const data = createTestFloor();
+    this.data = data;
 
     this.playerStart = {
       x: data.playerStartTile.col * TILE_SIZE + TILE_SIZE / 2,
@@ -61,13 +61,10 @@ export class TestFloor {
 
         if (cell === CellType.Wall) {
           this.drawWall(graphics, data, col, row, x, y);
-        } else if (cell === CellType.ExitDoor) {
-          graphics.fillStyle(COLOR_DOOR, 1);
-          graphics.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-          graphics.fillStyle(COLOR_DOOR_SEAM, 1);
-          graphics.fillRect(x + TILE_SIZE / 2 - 1, y + 3, 2, TILE_SIZE - 6);
         } else {
-          this.drawFloor(graphics, data, cell, col, row, x, y);
+          // Клетки выходной двери рисуются как пол: саму дверь показывает
+          // система прогрессии, а после открытия остаётся проход.
+          this.drawFloor(graphics, data, cell === CellType.ExitDoor ? CellType.Floor : cell, col, row, x, y);
         }
       }
     }
@@ -161,9 +158,9 @@ export class TestFloor {
       let runStart = -1;
 
       for (let col = 0; col <= FLOOR_COLUMNS; col++) {
-        const blocking =
-          col < FLOOR_COLUMNS &&
-          (data.grid[row][col] === CellType.Wall || data.grid[row][col] === CellType.ExitDoor);
+        // Выходная дверь сюда не входит: её твёрдое тело создаётся отдельно,
+        // чтобы коллизию можно было отключить независимо от стен.
+        const blocking = col < FLOOR_COLUMNS && data.grid[row][col] === CellType.Wall;
 
         if (blocking && runStart < 0) {
           runStart = col;

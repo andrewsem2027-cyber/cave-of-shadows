@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { GAME_HEIGHT, GAME_WIDTH } from '../config';
+import { KeyState } from '../domain/progression/KeyState';
+import { KeyInteractionSystem } from '../systems/KeyInteractionSystem';
 import { LightingSystem } from '../systems/LightingSystem';
 import { TestFloor } from '../world/TestFloor';
 
@@ -46,6 +48,7 @@ export class GameScene extends Phaser.Scene {
   };
   private moveVector = new Phaser.Math.Vector2(0, 0);
   private testFloor!: TestFloor;
+  private keyState!: KeyState;
 
   constructor() {
     super('GameScene');
@@ -62,6 +65,9 @@ export class GameScene extends Phaser.Scene {
     this.createPlayer();
     this.createCamera();
     this.createKeyboard();
+
+    this.keyState = new KeyState();
+    new KeyInteractionSystem(this, this.player, this.testFloor.data.progression, this.keyState);
 
     this.lighting = new LightingSystem(this);
     this.createLanternButton();
