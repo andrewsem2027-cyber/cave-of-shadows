@@ -50,6 +50,16 @@ export class TestFloor {
       .setOrigin(0.5, 0);
   }
 
+  /** Безопасная ли клетка под мировой позицией (только SafeFloor, с проверкой границ). */
+  isSafeAtWorldPosition(x: number, y: number): boolean {
+    const col = Math.floor(x / TILE_SIZE);
+    const row = Math.floor(y / TILE_SIZE);
+    if (col < 0 || col >= FLOOR_COLUMNS || row < 0 || row >= FLOOR_ROWS) {
+      return false;
+    }
+    return this.data.grid[row][col] === CellType.SafeFloor;
+  }
+
   private draw(scene: Phaser.Scene, data: TestFloorData): void {
     const graphics = scene.add.graphics();
 

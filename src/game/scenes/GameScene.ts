@@ -4,6 +4,7 @@ import { KeyState } from '../domain/progression/KeyState';
 import { KeyInteractionSystem } from '../systems/KeyInteractionSystem';
 import { GuardianSystem } from '../systems/GuardianSystem';
 import { LightingSystem } from '../systems/LightingSystem';
+import { PlayerHealthSystem } from '../systems/PlayerHealthSystem';
 import { TestFloor } from '../world/TestFloor';
 
 const PLAYER_SPEED = 160;
@@ -19,6 +20,12 @@ const LANTERN_BUTTON_SIZE = 64;
 const UI_DEPTH = 200;
 
 const CAMERA_LERP = 0.12;
+
+const GUARDIAN_PAUSE_AFTER_HIT_MS = 700;
+const GUARDIAN_WAKE_DELAY_MS = 3000;
+const DEATH_FADE_MS = 700;
+const DEATH_HOLD_MS = 900;
+const RESPAWN_FADE_MS = 400;
 
 const COLOR_BACKGROUND = 0x0a0a12;
 const COLOR_PLAYER = 0x7a68e0;
@@ -51,6 +58,13 @@ export class GameScene extends Phaser.Scene {
   private testFloor!: TestFloor;
   private keyState!: KeyState;
   private guardian!: GuardianSystem;
+  private health!: PlayerHealthSystem;
+  /** Игра начинается в безопасной комнате. */
+  private playerIsSafe = true;
+  private isRespawning = false;
+  private guardianWakeTimer: Phaser.Time.TimerEvent | null = null;
+  private deathTimer: Phaser.Time.TimerEvent | null = null;
+  private deathText: Phaser.GameObjects.Text | null = null;
 
   constructor() {
     super('GameScene');
@@ -84,6 +98,13 @@ export class GameScene extends Phaser.Scene {
       (col, row) => keyInteractions.isDoorClosedAt(col, row),
       this.testFloor.solids,
     );
+    // Игра начинается в безопасной комнате: страж изначально спит.
+    this.guardian.sleep();
+
+    this.health = new PlayerHealthSystem(this, this.player);
+    this.physics.add.overlap(this.player, this.guardian.gameObject, () => {
+      this.handleGuardianContact();
+    });
 
     this.lighting = new LightingSystem(this);
     this.createLanternButton();
@@ -94,9 +115,26 @@ export class GameScene extends Phaser.Scene {
 
     this.game.events.on(Phaser.Core.Events.BLUR, this.handleFocusLoss, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.handleFocusLoss, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanupRun, this);
+  }
+
+  /** Очистка таймеров и временных объектов жизненного цикла при остановке сцены. */
+  private cleanupRun(): void {
+    this.cancelGuardianWakeTimer();
+    this.deathTimer?.remove(false);
+    this.deathTimer = null;
+    this.deathText?.destroy();
+    this.deathText = null;
   }
 
   update(): void {
+    if (this.isRespawning) {
+      // Во время смерти: игрок неподвижен, управление и урон заблокированы.
+      this.player.setVelocity(0, 0);
+      this.lighting.update(this.player.x, this.player.y);
+      return;
+    }
+
     const left = this.cursors.left.isDown || this.wasdKeys.A.isDown || this.isDpadActive('left');
     const right = this.cursors.right.isDown || this.wasdKeys.D.isDown || this.isDpadActive('right');
     const up = this.cursors.up.isDown || this.wasdKeys.W.isDown || this.isDpadActive('up');
@@ -116,6 +154,98 @@ export class GameScene extends Phaser.Scene {
 
     this.lighting.update(this.player.x, this.player.y);
     this.guardian.update();
+    this.updateSafeRoomState();
+  }
+
+  /** Переходы «вошёл/вышел» из безопасной комнаты, реакция только на фронт. */
+  private updateSafeRoomState(): void {
+    const safeNow = this.testFloor.isSafeAtWorldPosition(this.player.x, this.player.y);
+    if (safeNow === this.playerIsSafe) {
+      return;
+    }
+    this.playerIsSafe = safeNow;
+    if (safeNow) {
+      this.enterSafeRoom();
+    } else {
+      this.exitSafeRoom();
+    }
+  }
+
+  private cancelGuardianWakeTimer(): void {
+    this.guardianWakeTimer?.remove(false);
+    this.guardianWakeTimer = null;
+  }
+
+  /** Вход: отменить пробуждение, усыпить стража и вернуть его в исходную точку. */
+  private enterSafeRoom(): void {
+    this.cancelGuardianWakeTimer();
+    this.guardian.sleep();
+  }
+
+  /** Выход: страж остаётся спящим ещё GUARDIAN_WAKE_DELAY_MS. */
+  private exitSafeRoom(): void {
+    this.cancelGuardianWakeTimer();
+    this.guardianWakeTimer = this.time.delayedCall(GUARDIAN_WAKE_DELAY_MS, () => {
+      this.guardianWakeTimer = null;
+      if (!this.playerIsSafe && !this.health.isDead && !this.isRespawning) {
+        this.guardian.wake();
+      }
+    });
+  }
+
+  /** Касание стража: урон, пауза стража или последовательность смерти. */
+  private handleGuardianContact(): void {
+    if (this.isRespawning || this.health.isDead) {
+      return;
+    }
+    if (this.playerIsSafe) {
+      return;
+    }
+    const result = this.health.takeDamage();
+    if (result === 'damaged') {
+      this.guardian.pauseFor(GUARDIAN_PAUSE_AFTER_HIT_MS);
+    } else if (result === 'dead') {
+      this.startDeathSequence();
+    }
+  }
+
+  /**
+   * Смерть и возрождение в стартовой точке безопасной комнаты.
+   * Прогресс (ключи, двери, сундук, фонарь) не сбрасывается.
+   */
+  private startDeathSequence(): void {
+    this.isRespawning = true;
+    this.player.setVelocity(0, 0);
+    this.handleFocusLoss();
+
+    this.cancelGuardianWakeTimer();
+    this.guardian.sleep();
+
+    this.deathText = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'ВЫ ПОГИБЛИ', { fontSize: '32px', color: '#ff6b7a' })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(UI_DEPTH + 1);
+
+    this.cameras.main.fadeOut(DEATH_FADE_MS, 0, 0, 0);
+
+    this.deathTimer = this.time.delayedCall(DEATH_HOLD_MS, () => {
+      this.deathTimer = null;
+
+      // Дискретное возрождение: body.reset переносит игрока и останавливает его.
+      (this.player.body as Phaser.Physics.Arcade.Body).reset(
+        this.testFloor.playerStart.x,
+        this.testFloor.playerStart.y,
+      );
+      this.health.reset();
+      this.playerIsSafe = true;
+
+      this.deathText?.destroy();
+      this.deathText = null;
+      this.cameras.main.fadeIn(RESPAWN_FADE_MS, 0, 0, 0);
+      this.isRespawning = false;
+      // Страж остаётся спящим до следующего выхода из безопасной комнаты.
+    });
   }
 
   private createTextures(): void {

@@ -31,6 +31,13 @@ export class GuardianSystem {
   private lastWatchX = 0;
   private lastWatchY = 0;
   private lastMoveAt = 0;
+  /** Исходная удалённая точка стража (центр центральной полости). */
+  private readonly homeCell: GridPoint;
+  /** Сон в безопасной комнате: нет движения, BFS и урона. */
+  private sleeping = false;
+  /** Временная пауза после удара: сохранённый шаг продолжается после неё. */
+  private paused = false;
+  private pauseTimer: Phaser.Time.TimerEvent | null = null;
 
   constructor(
     private readonly scene: Phaser.Scene,
@@ -57,13 +64,25 @@ export class GuardianSystem {
     scene.physics.add.collider(this.guardian, solids);
 
     this.reachedCell = { col: startTile.col, row: startTile.row };
+    this.homeCell = { col: startTile.col, row: startTile.row };
     this.lastWatchX = this.guardian.x;
     this.lastWatchY = this.guardian.y;
     this.lastMoveAt = scene.time.now;
 
     scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.pauseTimer?.remove(false);
+      this.pauseTimer = null;
       this.guardian.destroy();
     });
+  }
+
+  /** Игровой объект стража для Arcade overlap с игроком. */
+  get gameObject(): Phaser.Physics.Arcade.Image {
+    return this.guardian;
+  }
+
+  get isSleeping(): boolean {
+    return this.sleeping;
   }
 
   /** Тёмное тело с двумя светлыми глазами, текстура без PNG. */
@@ -158,7 +177,81 @@ export class GuardianSystem {
     }
   }
 
+  /** Скорость строго по одной оси в направлении сохранённой targetCell. */
+  private applyStepVelocity(): void {
+    const target = this.targetCell;
+    if (target === null) {
+      this.guardian.setVelocity(0, 0);
+      return;
+    }
+    const dc = target.col - this.reachedCell.col;
+    const dr = target.row - this.reachedCell.row;
+    if (dc !== 0) {
+      this.guardian.setVelocity(dc > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED, 0);
+    } else {
+      this.guardian.setVelocity(0, dr > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED);
+    }
+  }
+
+  /** Переинициализация watchdog с текущей позиции и времени. */
+  private resetWatchdog(): void {
+    this.lastWatchX = this.guardian.x;
+    this.lastWatchY = this.guardian.y;
+    this.lastMoveAt = this.scene.time.now;
+  }
+
+  /**
+   * Временная пауза после удара по игроку: скорость нулевая, targetCell и
+   * reachedCell сохраняются, body.reset не вызывается, BFS не запускается.
+   * После паузы продолжается тот же ортогональный шаг.
+   */
+  pauseFor(durationMs: number): void {
+    if (this.sleeping) {
+      return;
+    }
+    this.pauseTimer?.remove(false);
+    this.paused = true;
+    this.guardian.setVelocity(0, 0);
+    this.pauseTimer = this.scene.time.delayedCall(durationMs, () => {
+      this.pauseTimer = null;
+      this.paused = false;
+      if (this.sleeping) {
+        return;
+      }
+      // Продолжение сохранённого шага без нового BFS.
+      this.applyStepVelocity();
+      this.resetWatchdog();
+    });
+  }
+
+  /**
+   * Сон в безопасной комнате: остановка, сброс цели и watchdog, один
+   * body.reset в исходную точку; BFS и движение прекращаются.
+   */
+  sleep(): void {
+    this.pauseTimer?.remove(false);
+    this.pauseTimer = null;
+    this.paused = false;
+    this.sleeping = true;
+    this.targetCell = null;
+    this.guardian.setVelocity(0, 0);
+    this.placeAt(
+      this.homeCell.col * TILE_SIZE + TILE_SIZE / 2,
+      this.homeCell.row * TILE_SIZE + TILE_SIZE / 2,
+    );
+    this.reachedCell = { col: this.homeCell.col, row: this.homeCell.row };
+    this.resetWatchdog();
+  }
+
+  /** Пробуждение: страж стоит в центре исходной клетки, BFS — на следующем update. */
+  wake(): void {
+    this.sleeping = false;
+  }
+
   update(): void {
+    if (this.sleeping || this.paused) {
+      return;
+    }
     if (this.targetCell === null) {
       // Ожидание в центре: шаг всегда начинается точно из центра
       // последней достигнутой клетки.
@@ -174,14 +267,7 @@ export class GuardianSystem {
       // Поперечная координата уже точная (стоим в центре reachedCell).
       // Watchdog уже инициализирован в pickNextStep. Дальше в этом кадре
       // нельзя вызывать placeAt/reset и аварийное восстановление.
-      const next: GridPoint = this.targetCell;
-      const dc = next.col - this.reachedCell.col;
-      const dr = next.row - this.reachedCell.row;
-      if (dc !== 0) {
-        this.guardian.setVelocity(dc > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED, 0);
-      } else {
-        this.guardian.setVelocity(0, dr > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED);
-      }
+      this.applyStepVelocity();
       return;
     }
 
