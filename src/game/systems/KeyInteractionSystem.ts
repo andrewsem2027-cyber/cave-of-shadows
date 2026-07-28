@@ -27,6 +27,7 @@ const MISSING_KEY_TEXT: Record<KeyColor, string> = {
 interface DoorRuntime {
   color: KeyColor;
   opened: boolean;
+  tiles: TilePoint[];
   image: Phaser.GameObjects.Image;
   body: Phaser.Physics.Arcade.StaticBody;
   collider: Phaser.Physics.Arcade.Collider;
@@ -191,7 +192,7 @@ export class KeyInteractionSystem {
     const body = solidZone.body as Phaser.Physics.Arcade.StaticBody;
     const collider = this.scene.physics.add.collider(this.player, solidZone);
 
-    const door: DoorRuntime = { color, opened: false, image, body, collider };
+    const door: DoorRuntime = { color, opened: false, tiles, image, body, collider };
     this.doors.push(door);
 
     // Нетвёрдая зона приближения шире двери: коллайдер не пускает игрока
@@ -218,6 +219,16 @@ export class KeyInteractionSystem {
     door.collider.destroy();
     door.body.enable = false;
     door.image.destroy();
+  }
+
+  /** Публично для системы стража: закрытая дверь блокирует маршрут. */
+  isDoorClosedAt(col: number, row: number): boolean {
+    for (const door of this.doors) {
+      if (!door.opened && door.tiles.some((tile) => tile.col === col && tile.row === row)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private createChest(color: KeyColor, tile: TilePoint): void {

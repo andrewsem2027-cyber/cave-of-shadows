@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { GAME_HEIGHT, GAME_WIDTH } from '../config';
 import { KeyState } from '../domain/progression/KeyState';
 import { KeyInteractionSystem } from '../systems/KeyInteractionSystem';
+import { GuardianSystem } from '../systems/GuardianSystem';
 import { LightingSystem } from '../systems/LightingSystem';
 import { TestFloor } from '../world/TestFloor';
 
@@ -49,6 +50,7 @@ export class GameScene extends Phaser.Scene {
   private moveVector = new Phaser.Math.Vector2(0, 0);
   private testFloor!: TestFloor;
   private keyState!: KeyState;
+  private guardian!: GuardianSystem;
 
   constructor() {
     super('GameScene');
@@ -67,7 +69,21 @@ export class GameScene extends Phaser.Scene {
     this.createKeyboard();
 
     this.keyState = new KeyState();
-    new KeyInteractionSystem(this, this.player, this.testFloor.data.progression, this.keyState);
+    const keyInteractions = new KeyInteractionSystem(
+      this,
+      this.player,
+      this.testFloor.data.progression,
+      this.keyState,
+    );
+
+    this.guardian = new GuardianSystem(
+      this,
+      this.player,
+      this.testFloor.data.grid,
+      this.testFloor.data.guardianStartTile,
+      (col, row) => keyInteractions.isDoorClosedAt(col, row),
+      this.testFloor.solids,
+    );
 
     this.lighting = new LightingSystem(this);
     this.createLanternButton();
@@ -99,6 +115,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.lighting.update(this.player.x, this.player.y);
+    this.guardian.update();
   }
 
   private createTextures(): void {

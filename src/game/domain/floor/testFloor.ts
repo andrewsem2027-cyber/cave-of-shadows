@@ -55,6 +55,7 @@ export interface TestFloorData {
   /** grid[row][col] */
   grid: CellType[][];
   playerStartTile: TilePoint;
+  guardianStartTile: TilePoint;
   /** Ограничивающий прямоугольник безопасной полости (для подписи). */
   safeRoom: GridRect;
   exitDoorTiles: TilePoint[];
@@ -115,6 +116,9 @@ const EXIT_DOOR_TILES: TilePoint[] = [
 ];
 
 const PLAYER_START_TILE: TilePoint = { col: 5, row: 16 };
+
+/** Старт стража — центр центральной полости, вдали от игрока и дверей. */
+const GUARDIAN_START_TILE: TilePoint = { col: 19, row: 16 };
 
 /**
  * Первый цикл прогрессии: синий ключ в верхней полости открывает синюю дверь
@@ -210,6 +214,7 @@ export function createTestFloor(): TestFloorData {
   return {
     grid,
     playerStartTile: PLAYER_START_TILE,
+    guardianStartTile: GUARDIAN_START_TILE,
     safeRoom: {
       col: SAFE_BLOB.col - SAFE_BLOB.radiusX - 1,
       row: SAFE_BLOB.row - SAFE_BLOB.radiusY - 1,
