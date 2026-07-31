@@ -45,6 +45,11 @@ export class LightingSystem {
     return this.isOn;
   }
 
+  /** Read-only состояние фонаря для системы обнаружения стража. */
+  get isLanternOn(): boolean {
+    return this.isOn;
+  }
+
   toggle(): void {
     this.isOn = !this.isOn;
     this.radiusTween?.stop();

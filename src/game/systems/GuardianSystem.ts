@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { CellType, FLOOR_COLUMNS, FLOOR_ROWS, TILE_SIZE, TilePoint } from '../domain/floor/testFloor';
 import { findGridPath, GridPoint } from '../domain/pathfinding/findGridPath';
+import { hasGridLineOfSight } from '../domain/visibility/hasGridLineOfSight';
 
 const GUARDIAN_SIZE = 28;
 const GUARDIAN_SPEED = 65;
@@ -13,8 +14,20 @@ const GUARDIAN_BODY_SIZE = 20;
 const STUCK_TIMEOUT_MS = 500;
 const STUCK_MIN_MOVEMENT = 1;
 
+/** Радиус обнаружения (в клетках) при включённом фонаре. */
+const VISION_RADIUS_LANTERN_ON = 6;
+/** Радиус обнаружения (в клетках) при выключенном фонаре. */
+const VISION_RADIUS_LANTERN_OFF = 3;
+/** Интервал проверки зрения. */
+const SENSE_INTERVAL_MS = 150;
+/** Ожидание в последней известной точке перед возвратом в idle. */
+const SEARCH_WAIT_MS = 3000;
+
 const COLOR_BODY = 0x1a1a26;
 const COLOR_EYES = 0xffe9a8;
+const COLOR_INDICATOR = '#ffd98a';
+
+type AwarenessState = 'idle' | 'chasing' | 'searching';
 
 /**
  * Страж: пошаговая навигация по клеткам. Длинный маршрут не хранится —
@@ -38,6 +51,16 @@ export class GuardianSystem {
   /** Временная пауза после удара: сохранённый шаг продолжается после неё. */
   private paused = false;
   private pauseTimer: Phaser.Time.TimerEvent | null = null;
+  /** Текущее состояние обнаружения игрока. */
+  private awareness: AwarenessState = 'idle';
+  /** Последняя реально замеченная клетка игрока. */
+  private lastKnownPlayerCell: GridPoint | null = null;
+  /** Момент следующей проверки зрения (scene.time.now). */
+  private nextSenseAt = 0;
+  /** Конец ожидания в последней известной точке; null — ожидания нет. */
+  private searchEndsAt: number | null = null;
+  /** Один переиспользуемый индикатор «!»/«?» над стражем. */
+  private readonly indicator: Phaser.GameObjects.Text;
 
   constructor(
     private readonly scene: Phaser.Scene,
@@ -45,6 +68,10 @@ export class GuardianSystem {
     private readonly grid: CellType[][],
     startTile: TilePoint,
     private readonly isDoorClosedAt: (col: number, row: number) => boolean,
+    /** Непрозрачность для обзора: стены, закрытые двери, клетки вне карты. */
+    private readonly isOpaqueTile: (col: number, row: number) => boolean,
+    /** Read-only состояние фонаря: влияет только на радиус обнаружения. */
+    private readonly isLanternOn: () => boolean,
     solids: Phaser.Physics.Arcade.StaticGroup,
   ) {
     this.createTexture();
@@ -69,9 +96,20 @@ export class GuardianSystem {
     this.lastWatchY = this.guardian.y;
     this.lastMoveAt = scene.time.now;
 
+    // Индикатор состояния: мировой объект без setScrollFactor(0),
+    // глубина по умолчанию — ниже слоя темноты, сквозь неё не светит.
+    this.indicator = scene.add
+      .text(this.guardian.x, this.guardian.y - GUARDIAN_SIZE / 2, '', {
+        fontSize: '18px',
+        color: COLOR_INDICATOR,
+      })
+      .setOrigin(0.5, 1)
+      .setVisible(false);
+
     scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.pauseTimer?.remove(false);
       this.pauseTimer = null;
+      this.indicator.destroy();
       this.guardian.destroy();
     });
   }
@@ -124,14 +162,12 @@ export class GuardianSystem {
   }
 
   /**
-   * Выбор следующего шага: BFS от последней достигнутой клетки до клетки
-   * игрока, берётся только path[0]. Сохраняется, если это ровно один
+   * Выбор следующего шага: BFS от последней достигнутой клетки до целевой,
+   * берётся только path[0]. Сохраняется, если это ровно один
    * ортогональный шаг. Вызывается только при отсутствии текущей цели.
    */
-  private pickNextStep(): void {
-    const playerCell = this.currentCell(this.player.x, this.player.y);
-
-    const path = findGridPath(this.reachedCell, playerCell, FLOOR_COLUMNS, FLOOR_ROWS, (col, row) =>
+  private pickNextStep(target: GridPoint): void {
+    const path = findGridPath(this.reachedCell, target, FLOOR_COLUMNS, FLOOR_ROWS, (col, row) =>
       this.isWalkable(col, row),
     );
 
@@ -225,8 +261,8 @@ export class GuardianSystem {
   }
 
   /**
-   * Сон в безопасной комнате: остановка, сброс цели и watchdog, один
-   * body.reset в исходную точку; BFS и движение прекращаются.
+   * Сон в безопасной комнате: остановка, сброс цели, обнаружения и watchdog,
+   * один body.reset в исходную точку; BFS и движение прекращаются.
    */
   sleep(): void {
     this.pauseTimer?.remove(false);
@@ -234,6 +270,7 @@ export class GuardianSystem {
     this.paused = false;
     this.sleeping = true;
     this.targetCell = null;
+    this.clearAwareness();
     this.guardian.setVelocity(0, 0);
     this.placeAt(
       this.homeCell.col * TILE_SIZE + TILE_SIZE / 2,
@@ -243,23 +280,124 @@ export class GuardianSystem {
     this.resetWatchdog();
   }
 
-  /** Пробуждение: страж стоит в центре исходной клетки, BFS — на следующем update. */
+  /** Пробуждение: страж в idle, первая проверка зрения — через обычный интервал. */
   wake(): void {
     this.sleeping = false;
+    this.awareness = 'idle';
+    this.nextSenseAt = this.scene.time.now + SENSE_INTERVAL_MS;
+  }
+
+  /** Полный сброс обнаружения: idle, без последней позиции и индикатора. */
+  private clearAwareness(): void {
+    this.awareness = 'idle';
+    this.lastKnownPlayerCell = null;
+    this.searchEndsAt = null;
+    this.indicator.setVisible(false);
+  }
+
+  private showIndicator(mark: string): void {
+    this.indicator.setText(mark);
+    this.indicator.setVisible(true);
+  }
+
+  /**
+   * Проверка зрения не чаще SENSE_INTERVAL_MS: игрок виден, если он
+   * в радиусе состояния фонаря (круг через квадрат расстояния) и между
+   * клетками есть прямая видимость. Фактическая скрытая позиция игрока
+   * никуда не сохраняется.
+   */
+  private sensePlayer(): void {
+    const now = this.scene.time.now;
+    if (now < this.nextSenseAt) {
+      return;
+    }
+    this.nextSenseAt = now + SENSE_INTERVAL_MS;
+
+    const guardianCell = this.currentCell(this.guardian.x, this.guardian.y);
+    const playerCell = this.currentCell(this.player.x, this.player.y);
+    const radius = this.isLanternOn() ? VISION_RADIUS_LANTERN_ON : VISION_RADIUS_LANTERN_OFF;
+    const dc = playerCell.col - guardianCell.col;
+    const dr = playerCell.row - guardianCell.row;
+
+    const visible =
+      dc * dc + dr * dr <= radius * radius &&
+      hasGridLineOfSight(guardianCell, playerCell, this.isOpaqueTile);
+
+    if (visible) {
+      this.awareness = 'chasing';
+      this.lastKnownPlayerCell = playerCell;
+      this.searchEndsAt = null;
+      this.showIndicator('!');
+    } else if (this.awareness === 'chasing') {
+      // Потеря видимости: идём только к последней реально замеченной клетке.
+      this.awareness = 'searching';
+      this.showIndicator('?');
+    }
+  }
+
+  /**
+   * Нет активного шага: выбор следующего действия по состоянию обнаружения.
+   * Страж всегда стартует шаг точно из центра последней достигнутой клетки.
+   */
+  private decideNextStep(): void {
+    this.placeAt(
+      this.reachedCell.col * TILE_SIZE + TILE_SIZE / 2,
+      this.reachedCell.row * TILE_SIZE + TILE_SIZE / 2,
+    );
+    const now = this.scene.time.now;
+
+    if (this.awareness === 'searching' && this.lastKnownPlayerCell !== null) {
+      const arrived =
+        this.reachedCell.col === this.lastKnownPlayerCell.col &&
+        this.reachedCell.row === this.lastKnownPlayerCell.row;
+      // Ожидание запускается один раз: по прибытии в точку поиска.
+      if (this.searchEndsAt === null && arrived) {
+        this.searchEndsAt = now + SEARCH_WAIT_MS;
+      }
+      if (this.searchEndsAt !== null) {
+        // Ожидание: движения и BFS нет, проверки зрения продолжаются.
+        this.guardian.setVelocity(0, 0);
+        if (now >= this.searchEndsAt) {
+          this.clearAwareness();
+        }
+        return;
+      }
+      this.pickNextStep(this.lastKnownPlayerCell);
+      if (this.targetCell === null) {
+        // Пути к последней известной клетке нет: то же ожидание один раз.
+        this.searchEndsAt = now + SEARCH_WAIT_MS;
+        return;
+      }
+      this.applyStepVelocity();
+      return;
+    }
+
+    if (this.awareness === 'chasing') {
+      this.pickNextStep(this.currentCell(this.player.x, this.player.y));
+      if (this.targetCell === null) {
+        return;
+      }
+      this.applyStepVelocity();
+      return;
+    }
+
+    // idle: страж стоит, но проверки зрения продолжаются.
+    this.guardian.setVelocity(0, 0);
   }
 
   update(): void {
-    if (this.sleeping || this.paused) {
+    if (this.sleeping) {
       return;
     }
+    if (this.paused) {
+      return;
+    }
+
+    this.indicator.setPosition(this.guardian.x, this.guardian.y - GUARDIAN_SIZE / 2 - 2);
+    this.sensePlayer();
+
     if (this.targetCell === null) {
-      // Ожидание в центре: шаг всегда начинается точно из центра
-      // последней достигнутой клетки.
-      this.placeAt(
-        this.reachedCell.col * TILE_SIZE + TILE_SIZE / 2,
-        this.reachedCell.row * TILE_SIZE + TILE_SIZE / 2,
-      );
-      this.pickNextStep();
+      this.decideNextStep();
       if (this.targetCell === null) {
         return;
       }
@@ -267,7 +405,6 @@ export class GuardianSystem {
       // Поперечная координата уже точная (стоим в центре reachedCell).
       // Watchdog уже инициализирован в pickNextStep. Дальше в этом кадре
       // нельзя вызывать placeAt/reset и аварийное восстановление.
-      this.applyStepVelocity();
       return;
     }
 

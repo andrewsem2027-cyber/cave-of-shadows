@@ -50,6 +50,14 @@ export class TestFloor {
       .setOrigin(0.5, 0);
   }
 
+  /** Непрозрачная ли клетка для обзора: стена или выход за пределы карты. */
+  isOpaqueTile(col: number, row: number): boolean {
+    if (col < 0 || col >= FLOOR_COLUMNS || row < 0 || row >= FLOOR_ROWS) {
+      return true;
+    }
+    return this.data.grid[row][col] === CellType.Wall;
+  }
+
   /** Безопасная ли клетка под мировой позицией (только SafeFloor, с проверкой границ). */
   isSafeAtWorldPosition(x: number, y: number): boolean {
     const col = Math.floor(x / TILE_SIZE);

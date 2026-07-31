@@ -96,6 +96,9 @@ export class GameScene extends Phaser.Scene {
       this.testFloor.data.grid,
       this.testFloor.data.guardianStartTile,
       (col, row) => keyInteractions.isDoorClosedAt(col, row),
+      // Единый callback непрозрачности: стены и клетки вне карты плюс закрытые двери.
+      (col, row) => this.testFloor.isOpaqueTile(col, row) || keyInteractions.isDoorClosedAt(col, row),
+      () => this.lighting.isLanternOn,
       this.testFloor.solids,
     );
     // Игра начинается в безопасной комнате: страж изначально спит.
