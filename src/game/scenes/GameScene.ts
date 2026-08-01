@@ -700,6 +700,9 @@ export class GameScene extends Phaser.Scene {
       this.dpadButtons[direction].setAlpha(DPAD_ALPHA_IDLE);
     }
     this.input.keyboard?.resetKeys();
-    this.player.setVelocity(0, 0);
+    // При SHUTDOWN объекты сцены уже уничтожены Display List и тела нет:
+    // скорость сбрасываем только у живого тела.
+    const body = this.player.body as Phaser.Physics.Arcade.Body | null;
+    body?.setVelocity(0, 0);
   }
 }
