@@ -1,11 +1,18 @@
 import Phaser from 'phaser';
 import { GAME_HEIGHT, GAME_WIDTH } from '../config';
+import { ALL_CRYSTALS, FIRST_FLOOR, getFloorById, getNextFloor } from '../domain/floor/floors';
+import { FloorDefinition, TILE_SIZE, rectContains } from '../domain/floor/types';
 import { KeyState } from '../domain/progression/KeyState';
-import { KeyInteractionSystem } from '../systems/KeyInteractionSystem';
+import { MAX_FLASH_CHARGES, SaveData, createDefaultSave } from '../domain/save/SaveData';
+import { loadSave, writeSave } from '../domain/save/saveStorage';
+import { FlashSystem } from '../systems/FlashSystem';
 import { GuardianSystem } from '../systems/GuardianSystem';
 import { LightingSystem } from '../systems/LightingSystem';
+import { NotificationSystem } from '../systems/NotificationSystem';
 import { PlayerHealthSystem } from '../systems/PlayerHealthSystem';
-import { TestFloor } from '../world/TestFloor';
+import { ProgressionSystem } from '../systems/ProgressionSystem';
+import { TutorialSystem } from '../systems/TutorialSystem';
+import { FloorView } from '../world/FloorView';
 
 const PLAYER_SPEED = 160;
 const PLAYER_SIZE = 26;
@@ -17,6 +24,8 @@ const DPAD_ALPHA_IDLE = 0.4;
 const DPAD_ALPHA_PRESSED = 0.75;
 
 const LANTERN_BUTTON_SIZE = 64;
+const FLASH_BUTTON_SIZE = 64;
+const PAUSE_BUTTON_SIZE = 40;
 const UI_DEPTH = 200;
 
 const CAMERA_LERP = 0.12;
@@ -26,6 +35,10 @@ const GUARDIAN_WAKE_DELAY_MS = 3000;
 const DEATH_FADE_MS = 700;
 const DEATH_HOLD_MS = 900;
 const RESPAWN_FADE_MS = 400;
+const TRANSITION_FADE_MS = 450;
+const START_FADE_MS = 400;
+const TITLE_HOLD_MS = 1800;
+const TITLE_FADE_MS = 500;
 
 const COLOR_BACKGROUND = 0x0a0a12;
 const COLOR_PLAYER = 0x7a68e0;
@@ -39,14 +52,28 @@ type Direction = 'up' | 'down' | 'left' | 'right';
 
 const DIRECTIONS: Direction[] = ['up', 'down', 'left', 'right'];
 
+export interface GameSceneData {
+  floorId?: string;
+}
+
 export class GameScene extends Phaser.Scene {
+  private floor!: FloorDefinition;
   private player!: Phaser.Physics.Arcade.Image;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys!: Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
   private lanternKey!: Phaser.Input.Keyboard.Key;
+  private flashKey!: Phaser.Input.Keyboard.Key;
+  private escKey!: Phaser.Input.Keyboard.Key;
+  private pauseKey!: Phaser.Input.Keyboard.Key;
   private lighting!: LightingSystem;
+  private notify!: NotificationSystem;
+  private tutorial!: TutorialSystem;
   private lanternButton!: Phaser.GameObjects.Image;
   private lanternLabel!: Phaser.GameObjects.Text;
+  private flashButton!: Phaser.GameObjects.Image;
+  private pauseButton!: Phaser.GameObjects.Image;
+  private crystalsText!: Phaser.GameObjects.Text;
+  private chargesText!: Phaser.GameObjects.Text;
   private dpadButtons!: Record<Direction, Phaser.GameObjects.Image>;
   private dpadPointers: Record<Direction, Set<number>> = {
     up: new Set(),
@@ -55,13 +82,19 @@ export class GameScene extends Phaser.Scene {
     right: new Set(),
   };
   private moveVector = new Phaser.Math.Vector2(0, 0);
-  private testFloor!: TestFloor;
+  private floorView!: FloorView;
   private keyState!: KeyState;
+  private progression!: ProgressionSystem;
   private guardian!: GuardianSystem;
   private health!: PlayerHealthSystem;
+  private flash!: FlashSystem;
+  private save!: SaveData;
   /** Игра начинается в безопасной комнате. */
   private playerIsSafe = true;
   private isRespawning = false;
+  private transitioning = false;
+  /** Игра остановлена overlay-сценой паузы. */
+  private pausedOverlay = false;
   private guardianWakeTimer: Phaser.Time.TimerEvent | null = null;
   private deathTimer: Phaser.Time.TimerEvent | null = null;
   private deathText: Phaser.GameObjects.Text | null = null;
@@ -70,36 +103,77 @@ export class GameScene extends Phaser.Scene {
     super('GameScene');
   }
 
-  create(): void {
+  create(data: GameSceneData): void {
     this.cameras.main.setBackgroundColor(COLOR_BACKGROUND);
+
+    this.floor = getFloorById(data.floorId ?? '') ?? FIRST_FLOOR;
+    this.playerIsSafe = true;
+    this.isRespawning = false;
+    this.transitioning = false;
+    this.pausedOverlay = false;
+
+    // Глобальный прогресс: продолжение сохранённого этажа или новая игра.
+    this.save = loadSave() ?? createDefaultSave();
+    this.save.currentFloorId = this.floor.id;
+    writeSave(this.save);
 
     this.createTextures();
 
-    this.testFloor = new TestFloor(this);
-    this.physics.world.setBounds(0, 0, this.testFloor.widthPixels, this.testFloor.heightPixels);
+    this.floorView = new FloorView(this, this.floor);
+    this.physics.world.setBounds(0, 0, this.floorView.widthPixels, this.floorView.heightPixels);
 
     this.createPlayer();
     this.createCamera();
     this.createKeyboard();
 
+    this.notify = new NotificationSystem(this);
+    this.tutorial = new TutorialSystem(this.floor.order === 1, this.notify);
+
     this.keyState = new KeyState();
-    const keyInteractions = new KeyInteractionSystem(
+    this.progression = new ProgressionSystem(
       this,
       this.player,
-      this.testFloor.data.progression,
+      this.floor,
       this.keyState,
+      new Set(this.save.collectedCrystals),
+      this.notify,
+      {
+        onKeyCollected: () => {
+          this.tutorial.showOnce('keys', 'КЛЮЧИ ОТКРЫВАЮТ ОБЪЕКТЫ ТОГО ЖЕ СИМВОЛА');
+        },
+        onCrystalCollected: (color) => {
+          // Кристалл сохраняется сразу и больше не появляется.
+          if (!this.save.collectedCrystals.includes(color)) {
+            this.save.collectedCrystals.push(color);
+            writeSave(this.save);
+          }
+          this.notify.notify('КРИСТАЛЛ НАЙДЕН');
+          this.tutorial.showOnce('crystals', 'КРИСТАЛЛЫ СПРЯТАНЫ В НЕОБЯЗАТЕЛЬНЫХ МЕСТАХ');
+          this.updateCrystalsHud();
+        },
+        onChestOpened: (content) => {
+          if (content.kind === 'flashCharge') {
+            this.addFlashCharge();
+          } else {
+            this.notify.notify(content.message);
+          }
+        },
+      },
     );
 
     this.guardian = new GuardianSystem(
       this,
       this.player,
-      this.testFloor.data.grid,
-      this.testFloor.data.guardianStartTile,
-      (col, row) => keyInteractions.isDoorClosedAt(col, row),
+      this.floor.grid,
+      this.floor.cols,
+      this.floor.rows,
+      this.floor.guardianStart,
+      this.floor.guardianSpeed,
+      (col, row) => this.progression.isDoorClosedAt(col, row),
       // Единый callback непрозрачности: стены и клетки вне карты плюс закрытые двери.
-      (col, row) => this.testFloor.isOpaqueTile(col, row) || keyInteractions.isDoorClosedAt(col, row),
+      (col, row) => this.floorView.isOpaqueTile(col, row) || this.progression.isDoorClosedAt(col, row),
       () => this.lighting.isLanternOn,
-      this.testFloor.solids,
+      this.floorView.solids,
     );
     // Игра начинается в безопасной комнате: страж изначально спит.
     this.guardian.sleep();
@@ -109,20 +183,48 @@ export class GameScene extends Phaser.Scene {
       this.handleGuardianContact();
     });
 
+    this.flash = new FlashSystem(
+      this,
+      this.player,
+      this.guardian,
+      (col, row) => this.floorView.isOpaqueTile(col, row) || this.progression.isDoorClosedAt(col, row),
+      this.notify,
+      {
+        getCharges: () => this.save.flashCharges,
+        spendCharge: () => {
+          this.save.flashCharges -= 1;
+          writeSave(this.save);
+          this.updateChargesHud();
+        },
+        canAct: () =>
+          !this.health.isDead && !this.isRespawning && !this.transitioning && !this.pausedOverlay,
+      },
+    );
+
     this.lighting = new LightingSystem(this);
+    this.lighting.setLantern(true);
     this.createLanternButton();
+    this.createFlashButton();
+    this.createPauseButton();
+    this.createHudCounters();
 
     // Два дополнительных указателя для диагонального мультитача на D-pad.
     this.input.addPointer(2);
     this.createDpad();
+
+    this.showFloorTitle();
+    this.cameras.main.fadeIn(START_FADE_MS, 0, 0, 0);
+    this.tutorial.showOnce('move', 'ИСПОЛЬЗУЙ WASD ИЛИ СТРЕЛКИ');
+    this.tutorial.showOnce('safe', 'В БЕЗОПАСНОЙ КОМНАТЕ СТРАЖ СПИТ');
 
     this.game.events.on(Phaser.Core.Events.BLUR, this.handleFocusLoss, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.handleFocusLoss, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanupRun, this);
   }
 
-  /** Очистка таймеров и временных объектов жизненного цикла при остановке сцены. */
+  /** Очистка таймеров, слушателей игры и временных объектов при остановке сцены. */
   private cleanupRun(): void {
+    this.game.events.off(Phaser.Core.Events.BLUR, this.handleFocusLoss, this);
     this.cancelGuardianWakeTimer();
     this.deathTimer?.remove(false);
     this.deathTimer = null;
@@ -134,6 +236,11 @@ export class GameScene extends Phaser.Scene {
     if (this.isRespawning) {
       // Во время смерти: игрок неподвижен, управление и урон заблокированы.
       this.player.setVelocity(0, 0);
+      this.lighting.update(this.player.x, this.player.y);
+      return;
+    }
+
+    if (this.transitioning) {
       this.lighting.update(this.player.x, this.player.y);
       return;
     }
@@ -154,15 +261,125 @@ export class GameScene extends Phaser.Scene {
     if (Phaser.Input.Keyboard.JustDown(this.lanternKey)) {
       this.toggleLantern();
     }
+    if (Phaser.Input.Keyboard.JustDown(this.flashKey)) {
+      this.flash.tryFlash();
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.escKey) || Phaser.Input.Keyboard.JustDown(this.pauseKey)) {
+      this.openPause();
+    }
 
     this.lighting.update(this.player.x, this.player.y);
     this.guardian.update();
     this.updateSafeRoomState();
+    this.checkTransitionZone();
+  }
+
+  /** Переход разрешён только после открытия выходной двери. */
+  private checkTransitionZone(): void {
+    if (!this.progression.isExitDoorOpen()) {
+      return;
+    }
+    const col = Math.floor(this.player.x / TILE_SIZE);
+    const row = Math.floor(this.player.y / TILE_SIZE);
+    if (rectContains(this.floor.transitionZone, col, row)) {
+      this.startFloorTransition();
+    }
+  }
+
+  /**
+   * Переход на следующий этаж: блокировка ввода, сон стража, затемнение
+   * и перезапуск сцены с новым определением этажа. Защищён флагом
+   * от повторного запуска.
+   */
+  private startFloorTransition(): void {
+    if (this.transitioning) {
+      return;
+    }
+    this.transitioning = true;
+    this.player.setVelocity(0, 0);
+    this.handleFocusLoss();
+
+    this.cancelGuardianWakeTimer();
+    this.guardian.sleep();
+
+    this.cameras.main.fadeOut(TRANSITION_FADE_MS, 0, 0, 0);
+    this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      const next = getNextFloor(this.floor);
+      if (next !== undefined) {
+        // Сохранить глобальный прогресс и загрузить следующий этаж.
+        this.save.currentFloorId = next.id;
+        this.save.unlockedFloor = Math.max(this.save.unlockedFloor, next.order);
+        writeSave(this.save);
+        this.scene.restart({ floorId: next.id });
+        return;
+      }
+      // Выход третьего этажа: завершение игры.
+      this.save.completed = true;
+      writeSave(this.save);
+      this.scene.start('VictoryScene');
+    });
+  }
+
+  /** Заряд вспышки из сундука: при максимуме сундук всё равно открывается. */
+  private addFlashCharge(): void {
+    if (this.save.flashCharges >= MAX_FLASH_CHARGES) {
+      this.notify.notify('ЗАРЯДЫ ЗАПОЛНЕНЫ');
+      return;
+    }
+    this.save.flashCharges += 1;
+    writeSave(this.save);
+    this.updateChargesHud();
+    this.notify.notify('ЗАРЯД СВЕТА +1');
+    this.tutorial.showOnce('flash', 'SPACE — СВЕТОВАЯ ВСПЫШКА');
+  }
+
+  /** Компактные счётчики кристаллов и зарядов под индикаторами ключей. */
+  private createHudCounters(): void {
+    this.crystalsText = this.add
+      .text(16, 84, '', { fontSize: '16px', color: '#9fb4ff' })
+      .setOrigin(0, 0.5)
+      .setScrollFactor(0)
+      .setDepth(UI_DEPTH);
+    this.chargesText = this.add
+      .text(16, 108, '', { fontSize: '16px', color: '#ffd98a' })
+      .setOrigin(0, 0.5)
+      .setScrollFactor(0)
+      .setDepth(UI_DEPTH);
+    this.updateCrystalsHud();
+    this.updateChargesHud();
+  }
+
+  private updateCrystalsHud(): void {
+    this.crystalsText.setText(`◆ ${this.save.collectedCrystals.length}/${ALL_CRYSTALS.length}`);
+  }
+
+  private updateChargesHud(): void {
+    this.chargesText.setText(`✦ ${this.save.flashCharges}/${MAX_FLASH_CHARGES}`);
+  }
+
+  /** Название этажа по центру экрана на короткое время. */
+  private showFloorTitle(): void {
+    const title = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 60, `ЭТАЖ ${this.floor.order} — ${this.floor.name.toUpperCase()}`, {
+        fontSize: '24px',
+        color: '#9fb4ff',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(UI_DEPTH + 1);
+
+    this.tweens.add({
+      targets: title,
+      alpha: 0,
+      delay: TITLE_HOLD_MS,
+      duration: TITLE_FADE_MS,
+      onComplete: () => title.destroy(),
+    });
   }
 
   /** Переходы «вошёл/вышел» из безопасной комнаты, реакция только на фронт. */
   private updateSafeRoomState(): void {
-    const safeNow = this.testFloor.isSafeAtWorldPosition(this.player.x, this.player.y);
+    const safeNow = this.floorView.isSafeAtWorldPosition(this.player.x, this.player.y);
     if (safeNow === this.playerIsSafe) {
       return;
     }
@@ -198,7 +415,7 @@ export class GameScene extends Phaser.Scene {
 
   /** Касание стража: урон, пауза стража или последовательность смерти. */
   private handleGuardianContact(): void {
-    if (this.isRespawning || this.health.isDead) {
+    if (this.isRespawning || this.health.isDead || this.transitioning) {
       return;
     }
     if (this.playerIsSafe) {
@@ -214,7 +431,8 @@ export class GameScene extends Phaser.Scene {
 
   /**
    * Смерть и возрождение в стартовой точке безопасной комнаты.
-   * Прогресс (ключи, двери, сундук, фонарь) не сбрасывается.
+   * Прогресс этажа (ключи, двери, сундуки, кристаллы, заряды, фонарь)
+   * не сбрасывается; сцена и этаж не пересоздаются.
    */
   private startDeathSequence(): void {
     this.isRespawning = true;
@@ -237,8 +455,8 @@ export class GameScene extends Phaser.Scene {
 
       // Дискретное возрождение: body.reset переносит игрока и останавливает его.
       (this.player.body as Phaser.Physics.Arcade.Body).reset(
-        this.testFloor.playerStart.x,
-        this.testFloor.playerStart.y,
+        this.floorView.playerStart.x,
+        this.floorView.playerStart.y,
       );
       this.health.reset();
       this.playerIsSafe = true;
@@ -302,18 +520,51 @@ export class GameScene extends Phaser.Scene {
     graphics.generateTexture('lantern-off', LANTERN_BUTTON_SIZE, LANTERN_BUTTON_SIZE);
     graphics.clear();
 
+    // Кнопка вспышки: тёплая молния на подложке.
+    const flashCenter = FLASH_BUTTON_SIZE / 2;
+    graphics.fillStyle(COLOR_DPAD, 1);
+    graphics.fillRect(0, 0, FLASH_BUTTON_SIZE, FLASH_BUTTON_SIZE);
+    graphics.fillStyle(COLOR_LANTERN_ON, 1);
+    graphics.fillTriangle(
+      flashCenter + 4,
+      flashCenter - 18,
+      flashCenter - 10,
+      flashCenter + 4,
+      flashCenter + 2,
+      flashCenter + 4,
+    );
+    graphics.fillTriangle(
+      flashCenter - 4,
+      flashCenter + 18,
+      flashCenter + 10,
+      flashCenter - 2,
+      flashCenter - 2,
+      flashCenter - 2,
+    );
+    graphics.generateTexture('flash-button', FLASH_BUTTON_SIZE, FLASH_BUTTON_SIZE);
+    graphics.clear();
+
+    // Кнопка паузы: две вертикальные полосы.
+    graphics.fillStyle(COLOR_DPAD, 1);
+    graphics.fillRect(0, 0, PAUSE_BUTTON_SIZE, PAUSE_BUTTON_SIZE);
+    graphics.fillStyle(COLOR_DPAD_ARROW, 1);
+    graphics.fillRect(PAUSE_BUTTON_SIZE / 2 - 9, PAUSE_BUTTON_SIZE / 2 - 9, 6, 18);
+    graphics.fillRect(PAUSE_BUTTON_SIZE / 2 + 3, PAUSE_BUTTON_SIZE / 2 - 9, 6, 18);
+    graphics.generateTexture('pause-button', PAUSE_BUTTON_SIZE, PAUSE_BUTTON_SIZE);
+    graphics.clear();
+
     graphics.destroy();
   }
 
   private createPlayer(): void {
-    this.player = this.physics.add.image(this.testFloor.playerStart.x, this.testFloor.playerStart.y, 'player');
+    this.player = this.physics.add.image(this.floorView.playerStart.x, this.floorView.playerStart.y, 'player');
     this.player.setCollideWorldBounds(true);
-    this.physics.add.collider(this.player, this.testFloor.solids);
+    this.physics.add.collider(this.player, this.floorView.solids);
   }
 
   private createCamera(): void {
     const camera = this.cameras.main;
-    camera.setBounds(0, 0, this.testFloor.widthPixels, this.testFloor.heightPixels);
+    camera.setBounds(0, 0, this.floorView.widthPixels, this.floorView.heightPixels);
     camera.startFollow(this.player, true, CAMERA_LERP, CAMERA_LERP);
   }
 
@@ -325,6 +576,9 @@ export class GameScene extends Phaser.Scene {
     this.cursors = keyboard.createCursorKeys();
     this.wasdKeys = keyboard.addKeys('W,A,S,D') as Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
     this.lanternKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F);
+    this.flashKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.escKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    this.pauseKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.P);
   }
 
   private createLanternButton(): void {
@@ -346,11 +600,57 @@ export class GameScene extends Phaser.Scene {
     this.lanternLabel.setScrollFactor(0);
   }
 
+  /** Отдельная мобильная кнопка вспышки слева от кнопки фонаря. */
+  private createFlashButton(): void {
+    const x = GAME_WIDTH - DPAD_MARGIN - LANTERN_BUTTON_SIZE - 16 - FLASH_BUTTON_SIZE / 2;
+    const y = GAME_HEIGHT - DPAD_MARGIN - FLASH_BUTTON_SIZE / 2;
+
+    this.flashButton = this.add.image(x, y, 'flash-button');
+    this.flashButton.setDepth(UI_DEPTH);
+    this.flashButton.setScrollFactor(0);
+    this.flashButton.setInteractive();
+    this.flashButton.on('pointerdown', () => this.flash.tryFlash());
+  }
+
+  /** Мобильная кнопка паузы в правом верхнем углу, под сердцами. */
+  private createPauseButton(): void {
+    const x = GAME_WIDTH - 24 - PAUSE_BUTTON_SIZE / 2;
+    const y = 52;
+
+    this.pauseButton = this.add.image(x, y, 'pause-button');
+    this.pauseButton.setAlpha(0.7);
+    this.pauseButton.setDepth(UI_DEPTH);
+    this.pauseButton.setScrollFactor(0);
+    this.pauseButton.setInteractive();
+    this.pauseButton.on('pointerdown', () => this.openPause());
+  }
+
+  /**
+   * Открыть паузу: сброс ввода, остановка сцены и её таймеров,
+   * запуск overlay-сцены. Повторное открытие заблокировано флагом.
+   */
+  private openPause(): void {
+    if (this.pausedOverlay || this.isRespawning || this.transitioning || this.health.isDead) {
+      return;
+    }
+    this.pausedOverlay = true;
+    this.handleFocusLoss();
+    this.scene.pause();
+    this.scene.launch('PauseScene', { floorId: this.floor.id });
+  }
+
+  /** Вызывается PauseScene при возобновлении: сброс застрявшего ввода. */
+  resumeFromPause(): void {
+    this.pausedOverlay = false;
+    this.handleFocusLoss();
+  }
+
   private toggleLantern(): void {
     this.lighting.toggle();
     const isOn = this.lighting.lanternOn;
     this.lanternButton.setTexture(isOn ? 'lantern-on' : 'lantern-off');
     this.lanternLabel.setText(isOn ? 'ФОНАРЬ: ВКЛ' : 'ФОНАРЬ: ВЫКЛ');
+    this.tutorial.showOnce('light', 'СВЕТ ПОМОГАЕТ ВИДЕТЬ, НО ВЫДАЁТ ТЕБЯ');
   }
 
   private createDpad(): void {
@@ -400,6 +700,9 @@ export class GameScene extends Phaser.Scene {
       this.dpadButtons[direction].setAlpha(DPAD_ALPHA_IDLE);
     }
     this.input.keyboard?.resetKeys();
-    this.player.setVelocity(0, 0);
+    // При SHUTDOWN объекты сцены уже уничтожены Display List и тела нет:
+    // скорость сбрасываем только у живого тела.
+    const body = this.player.body as Phaser.Physics.Arcade.Body | null;
+    body?.setVelocity(0, 0);
   }
 }

@@ -3,16 +3,16 @@
  * Ключ не расходуется и хранится до конца этажа; количество не считается.
  */
 
-export type KeyColor = 'blue' | 'red';
+import type { GameColor } from '../colors/GameColor';
 
 export class KeyState {
-  private readonly found = new Set<KeyColor>();
+  private readonly found = new Set<GameColor>();
 
-  add(color: KeyColor): void {
+  add(color: GameColor): void {
     this.found.add(color);
   }
 
-  has(color: KeyColor): boolean {
+  has(color: GameColor): boolean {
     return this.found.has(color);
   }
 

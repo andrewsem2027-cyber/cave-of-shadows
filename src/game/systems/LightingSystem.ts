@@ -60,6 +60,14 @@ export class LightingSystem {
     });
   }
 
+  /** Мгновенная установка состояния без анимации (переходы, возрождение). */
+  setLantern(on: boolean): void {
+    this.isOn = on;
+    this.radiusTween?.stop();
+    this.radiusTween = null;
+    this.currentRadius = on ? LANTERN_ON_RADIUS : LANTERN_OFF_RADIUS;
+  }
+
   /** Принимает мировые координаты игрока, переводит их в экранные. */
   update(playerX: number, playerY: number): void {
     const camera = this.scene.cameras.main;

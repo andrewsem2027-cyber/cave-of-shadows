@@ -1,10 +1,9 @@
 import Phaser from 'phaser';
-import { CellType, FLOOR_COLUMNS, FLOOR_ROWS, TILE_SIZE, TilePoint } from '../domain/floor/testFloor';
+import { CellType, TILE_SIZE, TilePoint } from '../domain/floor/types';
 import { findGridPath, GridPoint } from '../domain/pathfinding/findGridPath';
 import { hasGridLineOfSight } from '../domain/visibility/hasGridLineOfSight';
 
 const GUARDIAN_SIZE = 28;
-const GUARDIAN_SPEED = 65;
 /**
  * Тело уже спрайта: запас по 6 px до стен в клетке 32 px,
  * чтобы углы стен не цепляли коллизию на поворотах.
@@ -66,7 +65,11 @@ export class GuardianSystem {
     private readonly scene: Phaser.Scene,
     private readonly player: Phaser.Physics.Arcade.Image,
     private readonly grid: CellType[][],
+    private readonly cols: number,
+    private readonly rows: number,
     startTile: TilePoint,
+    /** Скорость движения в пикселях в секунду, из определения этажа. */
+    private readonly speed: number,
     private readonly isDoorClosedAt: (col: number, row: number) => boolean,
     /** Непрозрачность для обзора: стены, закрытые двери, клетки вне карты. */
     private readonly isOpaqueTile: (col: number, row: number) => boolean,
@@ -123,6 +126,11 @@ export class GuardianSystem {
     return this.sleeping;
   }
 
+  /** Текущая клетка стража (для проверки дальности вспышки). */
+  get cell(): GridPoint {
+    return this.currentCell(this.guardian.x, this.guardian.y);
+  }
+
   /** Тёмное тело с двумя светлыми глазами, текстура без PNG. */
   private createTexture(): void {
     if (this.scene.textures.exists('guardian')) {
@@ -149,8 +157,8 @@ export class GuardianSystem {
 
   private currentCell(x: number, y: number): GridPoint {
     return {
-      col: Phaser.Math.Clamp(Math.floor(x / TILE_SIZE), 0, FLOOR_COLUMNS - 1),
-      row: Phaser.Math.Clamp(Math.floor(y / TILE_SIZE), 0, FLOOR_ROWS - 1),
+      col: Phaser.Math.Clamp(Math.floor(x / TILE_SIZE), 0, this.cols - 1),
+      row: Phaser.Math.Clamp(Math.floor(y / TILE_SIZE), 0, this.rows - 1),
     };
   }
 
@@ -167,7 +175,7 @@ export class GuardianSystem {
    * ортогональный шаг. Вызывается только при отсутствии текущей цели.
    */
   private pickNextStep(target: GridPoint): void {
-    const path = findGridPath(this.reachedCell, target, FLOOR_COLUMNS, FLOOR_ROWS, (col, row) =>
+    const path = findGridPath(this.reachedCell, target, this.cols, this.rows, (col, row) =>
       this.isWalkable(col, row),
     );
 
@@ -223,9 +231,9 @@ export class GuardianSystem {
     const dc = target.col - this.reachedCell.col;
     const dr = target.row - this.reachedCell.row;
     if (dc !== 0) {
-      this.guardian.setVelocity(dc > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED, 0);
+      this.guardian.setVelocity(dc > 0 ? this.speed : -this.speed, 0);
     } else {
-      this.guardian.setVelocity(0, dr > 0 ? GUARDIAN_SPEED : -GUARDIAN_SPEED);
+      this.guardian.setVelocity(0, dr > 0 ? this.speed : -this.speed);
     }
   }
 

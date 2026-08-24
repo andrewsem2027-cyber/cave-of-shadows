@@ -1,12 +1,5 @@
 import Phaser from 'phaser';
-import {
-  CellType,
-  FLOOR_COLUMNS,
-  FLOOR_ROWS,
-  TILE_SIZE,
-  TestFloorData,
-  createTestFloor,
-} from '../domain/floor/testFloor';
+import { CellType, FloorDefinition, TILE_SIZE, isWalkableCell } from '../domain/floor/types';
 
 const FLOOR_SHADES = [0x14141d, 0x15151f, 0x171822, 0x13131a];
 const SAFE_SHADES = [0x16202e, 0x17222f, 0x182433];
@@ -16,35 +9,32 @@ const WALL_SHADES = [0x232840, 0x262c46, 0x2b3350];
 const WALL_RIM = 0x3d4666;
 const COLOR_SAFE_LABEL = '#6f87a8';
 
-function isWalkable(cell: CellType): boolean {
-  return cell === CellType.Floor || cell === CellType.SafeFloor;
-}
-
 /**
- * Тонкий Phaser-слой фиксированного этажа: один Graphics для визуала,
- * статические тела для стен и двери. Логика планировки живёт в domain.
+ * Тонкий Phaser-слой этажа: один Graphics для визуала, статические тела
+ * для стен. Планировка и данные живут в domain (FloorDefinition).
  */
-export class TestFloor {
-  readonly widthPixels = FLOOR_COLUMNS * TILE_SIZE;
-  readonly heightPixels = FLOOR_ROWS * TILE_SIZE;
+export class FloorView {
+  readonly widthPixels: number;
+  readonly heightPixels: number;
   readonly playerStart: { x: number; y: number };
   readonly solids: Phaser.Physics.Arcade.StaticGroup;
-  readonly data: TestFloorData;
+  readonly data: FloorDefinition;
 
-  constructor(scene: Phaser.Scene) {
-    const data = createTestFloor();
-    this.data = data;
+  constructor(scene: Phaser.Scene, definition: FloorDefinition) {
+    this.data = definition;
+    this.widthPixels = definition.cols * TILE_SIZE;
+    this.heightPixels = definition.rows * TILE_SIZE;
 
     this.playerStart = {
-      x: data.playerStartTile.col * TILE_SIZE + TILE_SIZE / 2,
-      y: data.playerStartTile.row * TILE_SIZE + TILE_SIZE / 2,
+      x: definition.playerStart.col * TILE_SIZE + TILE_SIZE / 2,
+      y: definition.playerStart.row * TILE_SIZE + TILE_SIZE / 2,
     };
 
-    this.draw(scene, data);
-    this.solids = this.createSolids(scene, data);
+    this.draw(scene, definition);
+    this.solids = this.createSolids(scene, definition);
 
-    const labelX = (data.safeRoom.col + data.safeRoom.cols / 2) * TILE_SIZE;
-    const labelY = data.safeRoom.row * TILE_SIZE + 6;
+    const labelX = (definition.safeRoom.col + definition.safeRoom.cols / 2) * TILE_SIZE;
+    const labelY = definition.safeRoom.row * TILE_SIZE + 6;
     scene.add
       .text(labelX, labelY, 'БЕЗОПАСНО', { fontSize: '14px', color: COLOR_SAFE_LABEL })
       .setOrigin(0.5, 0);
@@ -52,7 +42,7 @@ export class TestFloor {
 
   /** Непрозрачная ли клетка для обзора: стена или выход за пределы карты. */
   isOpaqueTile(col: number, row: number): boolean {
-    if (col < 0 || col >= FLOOR_COLUMNS || row < 0 || row >= FLOOR_ROWS) {
+    if (col < 0 || col >= this.data.cols || row < 0 || row >= this.data.rows) {
       return true;
     }
     return this.data.grid[row][col] === CellType.Wall;
@@ -62,17 +52,17 @@ export class TestFloor {
   isSafeAtWorldPosition(x: number, y: number): boolean {
     const col = Math.floor(x / TILE_SIZE);
     const row = Math.floor(y / TILE_SIZE);
-    if (col < 0 || col >= FLOOR_COLUMNS || row < 0 || row >= FLOOR_ROWS) {
+    if (col < 0 || col >= this.data.cols || row < 0 || row >= this.data.rows) {
       return false;
     }
     return this.data.grid[row][col] === CellType.SafeFloor;
   }
 
-  private draw(scene: Phaser.Scene, data: TestFloorData): void {
+  private draw(scene: Phaser.Scene, data: FloorDefinition): void {
     const graphics = scene.add.graphics();
 
-    for (let row = 0; row < FLOOR_ROWS; row++) {
-      for (let col = 0; col < FLOOR_COLUMNS; col++) {
+    for (let row = 0; row < data.rows; row++) {
+      for (let col = 0; col < data.cols; col++) {
         const cell = data.grid[row][col];
         const x = col * TILE_SIZE;
         const y = row * TILE_SIZE;
@@ -91,7 +81,7 @@ export class TestFloor {
   /** Каменный пол с детерминированными вариациями оттенка и редкими трещинами. */
   private drawFloor(
     graphics: Phaser.GameObjects.Graphics,
-    data: TestFloorData,
+    data: FloorDefinition,
     cell: CellType,
     col: number,
     row: number,
@@ -119,7 +109,7 @@ export class TestFloor {
   /** Стена темнее пола; край рядом с проходом подсвечен, как скальный обрыв. */
   private drawWall(
     graphics: Phaser.GameObjects.Graphics,
-    data: TestFloorData,
+    data: FloorDefinition,
     col: number,
     row: number,
     x: number,
@@ -137,7 +127,7 @@ export class TestFloor {
    */
   private drawEdgeRim(
     graphics: Phaser.GameObjects.Graphics,
-    data: TestFloorData,
+    data: FloorDefinition,
     col: number,
     row: number,
     x: number,
@@ -146,11 +136,11 @@ export class TestFloor {
     rimAgainst: CellType | null,
   ): void {
     const matches = (targetCol: number, targetRow: number): boolean => {
-      if (targetCol < 0 || targetCol >= FLOOR_COLUMNS || targetRow < 0 || targetRow >= FLOOR_ROWS) {
+      if (targetCol < 0 || targetCol >= data.cols || targetRow < 0 || targetRow >= data.rows) {
         return false;
       }
       const neighbor = data.grid[targetRow][targetCol];
-      return rimAgainst === null ? isWalkable(neighbor) : neighbor === rimAgainst;
+      return rimAgainst === null ? isWalkableCell(neighbor) && neighbor !== CellType.ExitDoor : neighbor === rimAgainst;
     };
 
     graphics.fillStyle(color, 1);
@@ -169,16 +159,16 @@ export class TestFloor {
   }
 
   /** Строковые прогоны смежных непроходимых клеток объединяются в одно тело. */
-  private createSolids(scene: Phaser.Scene, data: TestFloorData): Phaser.Physics.Arcade.StaticGroup {
+  private createSolids(scene: Phaser.Scene, data: FloorDefinition): Phaser.Physics.Arcade.StaticGroup {
     const group = scene.physics.add.staticGroup();
 
-    for (let row = 0; row < FLOOR_ROWS; row++) {
+    for (let row = 0; row < data.rows; row++) {
       let runStart = -1;
 
-      for (let col = 0; col <= FLOOR_COLUMNS; col++) {
+      for (let col = 0; col <= data.cols; col++) {
         // Выходная дверь сюда не входит: её твёрдое тело создаётся отдельно,
         // чтобы коллизию можно было отключить независимо от стен.
-        const blocking = col < FLOOR_COLUMNS && data.grid[row][col] === CellType.Wall;
+        const blocking = col < data.cols && data.grid[row][col] === CellType.Wall;
 
         if (blocking && runStart < 0) {
           runStart = col;
